@@ -1,7 +1,6 @@
 ﻿
 #include "MainWindow.h"
 #include <QApplication>
-//#include <QOpenGLWidget>
 
 #include "utf8_setup.hpp"
 

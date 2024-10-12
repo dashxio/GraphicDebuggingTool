@@ -13,22 +13,6 @@
 #include <WinSock2.h>
 #include <Windows.h>
 
-//struct ClientInfo {
-//    SOCKET client_id;
-//    bytes_buffer received_data_buffer;
-//    bool wanted_close = false;
-//    bool wanted_send_data = true;
-//
-//    ClientInfo() = default;
-//    ClientInfo(SOCKET id) : client_id(id) {};
-//    ~ClientInfo() = default;
-//};
-//
-//struct ServerInfo {
-//    SOCKET server_id;
-//    bool wanted_close = false;
-//};
-
 class WSAContext {
 public:
     WSAContext();
