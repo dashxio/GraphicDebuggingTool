@@ -1,8 +1,8 @@
 ﻿
-#include "MainWindow.h"
+#include "server/MainWindow.h"
 #include <QApplication>
 
-#include "utf8_setup.hpp"
+#include "common/utf8_setup.hpp"
 
 int main(int argc, char* argv[])
 {

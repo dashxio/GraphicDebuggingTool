@@ -1,6 +1,6 @@
-﻿#include "Server.h"
+﻿#include "server/Server.h"
 
-#include "utf8_system_category.hpp"
+#include "common/utf8_system_category.hpp"
 
 #include <deque>
 #include <vector>

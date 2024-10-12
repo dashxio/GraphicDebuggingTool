@@ -1,5 +1,5 @@
 ﻿// mainwindow.cpp
-#include "mainwindow.h"
+#include "server/mainwindow.h"
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <AIS_Shape.hxx>
 //#include <QtConcurrent>

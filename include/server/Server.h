@@ -2,8 +2,8 @@
 #ifndef SERVER_H
 #define SERVER_H
 
-#include "bytes_buffer.hpp"
-#include "MTQueue.hpp"
+#include "common/bytes_buffer.hpp"
+#include "common/MTQueue.hpp"
 #include <unordered_map>
 
 #include <QObject>

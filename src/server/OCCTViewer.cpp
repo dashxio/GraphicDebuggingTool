@@ -1,5 +1,5 @@
 ﻿// occtviewer.cpp
-#include "OCCTViewer.h"
+#include "server/OCCTViewer.h"
 #include <Aspect_DisplayConnection.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <BRepTools.hxx>
