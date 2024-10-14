@@ -9,6 +9,8 @@
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
 
+#include "server/Server.h"
+
 #ifdef _WIN32
 #include <WNT_Window.hxx>
 #else
@@ -35,7 +37,7 @@ OcctViewer::~OcctViewer()
 void OcctViewer::drawBrepData()
 {
 	TopoDS_Shape shape;
-    std::istringstream iss(draw_brep_data);
+    std::istringstream iss(getCriticalSection().m_brep_data.value());
     BRep_Builder builder;
     BRepTools::Read(shape, iss, builder);
 
@@ -47,6 +49,7 @@ void OcctViewer::drawBrepData()
     Handle(AIS_Shape) aisShape = new AIS_Shape(shape);
     mContext->EraseAll(Standard_False);  // 清除之前的显示
     mContext->Display(aisShape, Standard_True);  // 显示新形状
+    getCriticalSection().m_has_drawn = true;
 }
 
 void OcctViewer::initOcctViewer()

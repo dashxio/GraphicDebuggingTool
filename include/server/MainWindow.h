@@ -16,7 +16,7 @@ public:
 
 private:
     OcctViewer* mOcctViewer;
-    Server* m_server;
+    MyServer* m_server;
 };
 
 #endif // MAINWINDOW_H
