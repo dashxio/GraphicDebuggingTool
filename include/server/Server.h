@@ -13,121 +13,63 @@
 #include <WinSock2.h>
 #include <Windows.h>
 
-class WSAContext {
-public:
-    WSAContext();
-    ~WSAContext();
-};
+inline auto& getCriticalSection() {
+	static struct CriticalSection {
+		std::atomic<bool> m_has_drawn;
+        MTObj<SOCKET> m_current_connetion_id;
+        std::atomic<bool> m_mode_draw_new = true;
+		MTObj<std::string> m_brep_data;
+        std::deque<SOCKET> m_connection_list;
+        MTQueue<SOCKET> m_connection_list_to_delete;
 
+	} c;
 
-class Server : public QObject {
+    return c;
+}
+
+class MyServer : public QObject {
     Q_OBJECT
 public:
-    Server(QObject* parent) : QObject(parent) { }
+    MyServer(QObject* parent) : QObject(parent) { }
+    MyServer& operator=(MyServer&&) = delete;
+    ~MyServer() override;
 
-    ~Server();
+	class WSAContext {
+	public:
+		WSAContext();
+		~WSAContext();
+	};
+
+    struct ConnectionInfo
+    {
+		SOCKET m_id;
+        bytes_buffer m_reserve_buffer;
+
+        int m_data_index = 0;
+        std::vector<std::string> m_brep_data_list;
+    };
 
 signals:
     void sigDrawDataReady();
+    void sigEraseSocket(SOCKET id);
 
 public:
-    Server& withListenPort(std::string ip, std::string port);
-    //Server& withDrawContext(Handle(AIS_InteractiveContext) context);
-    void startWork();
-    std::vector<std::thread>& workers() {
-        return m_workers;
-    }
+    MyServer& withListenPort(std::string ip, std::string port);
+    void run();
+    void acceptConnection();
+    void receiveBrepData(ConnectionInfo& connection);
+    void sleepUntilDrawn(ConnectionInfo& connection);
+	bool isConnectionIdValid(SOCKET connetion_id);
+
 
 private:
-    WSAContext m_wsa;
-    SOCKET m_id = INVALID_SOCKET;
-    std::vector<std::thread> m_workers;
+
+    WSAContext m_wsa_;
+    SOCKET m_id_ = INVALID_SOCKET;
+    std::thread m_work_thread_;
+    std::deque<std::function<void()>> m_task_deque_;
+    std::unordered_map<SOCKET, ConnectionInfo> m_connection_map_;
 };
 
-class ReceiveDataWorker {
-public:
-    void receiveData();
-
-    static std::thread makeWorker(Server* boss, SOCKET connection_id) {
-        std::thread t([=] {
-            ReceiveDataWorker r(boss, connection_id);
-            r.receiveData();
-        });
-        return std::move(t);
-    }
-
-    ReceiveDataWorker(Server* boss, SOCKET connection_id) : m_boss(boss), m_connection_id(connection_id) {}
-
-    Server* m_boss;
-    SOCKET m_connection_id;
-    bytes_buffer m_data_buffer;
-    std::deque<std::string> m_draw_data_list;
-};
-
-
-class AcceptConnectionWorker {
-public:
-    void acceptConnection();
-
-    static std::thread makeWorker(Server* boss, SOCKET server_id) {
-        std::thread t([=] {
-            AcceptConnectionWorker a(boss, server_id);
-            a.acceptConnection();
-        });
-        return std::move(t);
-    }
-
-    AcceptConnectionWorker(Server* boss, SOCKET server_id) : m_boss(boss), m_server_id(server_id) {}
-
-    Server* m_boss;
-    SOCKET m_server_id;
-};
-
-//class DrawWorker {
-//public:
-//    void draw();
-//
-//    static std::thread makeWorker(Handle(AIS_InteractiveContext) context) {
-//        std::thread t([=] {
-//            DrawWorker d;
-//            d.m_context = context;
-//            d.draw();
-//        });
-//        return std::move(t);
-//    }
-//
-//    Handle(AIS_InteractiveContext) m_context;
-//};
-
-
-//class Server : public QObject {
-//    Q_OBJECT
-//public:
-//    Server(QObject* parent) : QObject(parent) { }
-//    std::string getBrepData() {
-//        return brep_data_to_draw;
-//    }
-//
-//signals:
-//    void sigCreateListenSocket(std::string name, std::string port);
-//    void sigAcceptClientSocket(SOCKET server);
-//    void sigReceiveBrepData(SOCKET client_id);
-//    void sigDrawBrepData(QByteArray brep_data);
-//    void sigRemoveClientFromMap(SOCKET client_id);
-//
-//public slots:
-//    void onCreateListenSocket(std::string name, std::string port);
-//    void onAcceptClientSocket(SOCKET server);
-//    void onReceiveBrepData(SOCKET client_id);
-//    void onRemoveClientFromMap(SOCKET client_id);
-//
-//public:
-//	//SOCKET listen_id;
-//    std::unordered_map<SOCKET, ClientInfo> client_map;
-//    WSAContext wsa_context;
-//    bool server_wanted_close = false;
-//    std::string brep_data_to_draw;
-//    //void init();
-//};
 
 #endif

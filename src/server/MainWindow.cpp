@@ -8,13 +8,13 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     mOcctViewer = new OcctViewer(this);
-    m_server = new Server(this);
+    m_server = new MyServer(this);
     setCentralWidget(mOcctViewer);
 
-    connect(m_server, &Server::sigDrawDataReady, mOcctViewer, &OcctViewer::drawBrepData);
+    connect(m_server, &MyServer::sigDrawDataReady, mOcctViewer, &OcctViewer::drawBrepData);
 
     m_server->withListenPort("127.0.0.1", "12345")
-        .startWork();
+        .run();
 }
 
 MainWindow::~MainWindow()
