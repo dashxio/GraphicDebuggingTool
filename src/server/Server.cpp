@@ -1,6 +1,7 @@
 ﻿#include "server/Server.h"
 
 #include "common/utf8_system_category.hpp"
+#include "common/convert_return.hpp"
 
 #include <deque>
 #include <vector>
@@ -27,65 +28,6 @@ MyServer::WSAContext::~WSAContext() {
     WSACleanup();
 }
 
-template<typename T>
-class EasyLogic {
-public:
-    T expression_result;
-    std::function<void()> func;
-
-    EasyLogic(const T& t) : expression_result(t) {}
-
-    EasyLogic& execute(std::function<void()> f) {
-        func = std::move(f);
-        return *this;
-    }
-
-    EasyLogic& if_equal(const T& value) {
-        if (func) {
-            if (expression_result == value) {
-                func();
-            }
-        }
-        return *this;
-    }
-
-    EasyLogic& if_not_equal(const T& value) {
-        if (func) {
-            if (expression_result != value) {
-                func();
-            }
-        }
-        return *this;
-    }
-
-    EasyLogic& throw_if_equal(const T& value, std::string message = "error") {
-        if (expression_result == value) {
-            auto ec = std::error_code(WSAGetLastError(), utf8_system_category());
-            std::cerr << ec.message();
-            throw std::system_error(ec, message);
-        }
-        return *this;
-    }
-
-    EasyLogic& throw_if_not_equal(const T& value, std::string message = "error") {
-        if (expression_result != value) {
-            auto ec = std::error_code(WSAGetLastError(), utf8_system_category());
-            std::cerr << ec.message();
-            throw std::system_error(ec, message);
-        }
-        return *this;
-    }
-    
-    T result() noexcept {
-        return expression_result;
-    }
-};
-
-template<typename T>
-EasyLogic<T> convert_error(T t) {
-    return EasyLogic<T>(t);
-}
-
 MyServer::~MyServer()
 {
     if (m_id_ != INVALID_SOCKET) {
@@ -94,6 +36,7 @@ MyServer::~MyServer()
 
     m_work_thread_.join();
 }
+
 
 MyServer& MyServer::withListenPort(std::string ip, std::string port)
 {
@@ -115,177 +58,142 @@ MyServer& MyServer::withListenPort(std::string ip, std::string port)
         .throw_if_equal(SOCKET_ERROR);
 
     m_id_ = temp_id;
+	listen(m_id_, SOMAXCONN);
     return *this;
 }
 
-
 void MyServer::run()
 {
-	m_task_deque_.emplace_back([this] {
-		acceptConnection();
-		});
-
-    std::thread t([this]{
-        while(!m_task_deque_.empty()){
-            auto t = m_task_deque_.front();
-            m_task_deque_.pop_front();
-            t();
-        }
-        });
+	m_task_deque_.emplace_back(std::make_shared<ConnectionAcceptTask>(this));
+	
+	std::thread t([this] {
+		while (!m_task_deque_.empty()) {
+			auto t1 = m_task_deque_.front();
+			m_task_deque_.pop_front();
+			for (auto t2 : t1->run()) {
+				m_task_deque_.emplace_back(t2);
+			}
+		}
+	});
 
     m_work_thread_ = std::move(t);
 }
 
-void MyServer::acceptConnection()
+std::vector<std::shared_ptr<Task>> ErrorThrowTask::run()
 {
-    listen(m_id_, SOMAXCONN);
-
-	SOCKET connection_id;
-	sockaddr_in client_addr;
-	int addr_len = sizeof(client_addr);
-	connection_id = accept(m_id_, (struct sockaddr*)&client_addr, &addr_len);
-	if (connection_id == INVALID_SOCKET) {
-		if (WSAGetLastError() != WSAEWOULDBLOCK) {
-			auto ec = std::error_code(WSAGetLastError(), utf8_system_category());
-			throw std::system_error(ec, "accept");
-		}
-        else{
-            m_task_deque_.emplace_back([this]{
-                acceptConnection();
-            });
-        }
-	}
-	else {
-		
-		getCriticalSection().m_connection_list.push_back(connection_id);
-        m_connection_map_.emplace(connection_id, ConnectionInfo{connection_id});
-        getCriticalSection().m_current_connetion_id.setValue(connection_id);
-		m_task_deque_.emplace_back([this, connection_id]
-		{
-			receiveBrepData(m_connection_map_[connection_id]);
-		});
-		
-	}
-
+	auto ec = std::error_code(WSAGetLastError(), utf8_system_category());
+	std::cerr << ec.message();
+	throw std::system_error(ec, m_str);
+	return {};
 }
 
-void MyServer::receiveBrepData(ConnectionInfo& connection)
+std::vector<std::shared_ptr<Task>> ConnectionAcceptTask::run()
 {
-	if (!isConnectionIdValid(connection.m_id))
-		return;
+	sockaddr_in client_addr;
+	int addr_len = sizeof(client_addr);
+	auto res = convert_return(accept(m_boss_->m_id_, (struct sockaddr*)&client_addr, &addr_len))
+		.to(AcceptOne).if_meet_condition([](auto socket) {return socket != INVALID_SOCKET; })
+		.to(NeedReTry).if_meet_condition([](auto socket) {return socket == INVALID_SOCKET && WSAGetLastError() == WSAEWOULDBLOCK; })
+		.to(Error);
 
-    const int HEADER_SIZE = sizeof(int32_t);  // 消息头长度
+	SOCKET m_recently_connected = res.result();
+
+	// 状态转移
+	switch(res)
+	{
+	case AcceptOne:
+		m_boss_->m_connection_map_.emplace(m_recently_connected, MyServer::ConnectionInfo{ m_recently_connected });
+		return { std::make_shared<BrepDataReceiveTask>(m_boss_, m_recently_connected),
+			std::make_shared<BrepDataSetTask>(m_boss_, m_recently_connected) };
+
+	case NeedReTry:
+		return { std::make_shared<ConnectionAcceptTask>(m_boss_) };
+
+	default:
+		return { std::make_shared<ErrorThrowTask>("Accept") };
+	}
+}
+
+std::vector<std::shared_ptr<Task>> BrepDataReceiveTask::run()
+{
+	auto& connection = m_boss_->m_connection_map_[m_connection_id_];
 	auto& temp_data_buffer = connection.m_reserve_buffer;
-
 	size_t old_size = temp_data_buffer.size();
 	size_t new_size = old_size + 4096;
 	temp_data_buffer.resize(new_size);
 
-	int received = recv(connection.m_id, temp_data_buffer.data() + old_size, 4096, 0);
+	auto res = convert_return(recv(m_connection_id_, temp_data_buffer.data()+old_size, 4096,0))
+		.to(Received).if_meet_condition([](auto received) {return received > 0; })
+		.to(ClientClosed).if_meet_condition([](auto received){return received == 0;})
+		.to(NeedReTry).if_meet_condition([](auto received){return received < 0 && WSAGetLastError() == WSAEWOULDBLOCK;})
+		.to(Error);
 
-	if (received == 0)
-	{
-		std::cout << "Connection " << connection.m_id << " closed by client.\n";
-		m_task_deque_.emplace_back([this, &connection]
-			{
-                //emit sigEraseSocket(connetion.m_id);
-				m_connection_map_.erase(connection.m_id);
-			});
-        return;
+	switch(res){
+	case Received:
+		temp_data_buffer.resize(old_size+res.result());
+		return { std::make_shared<BrepDataReceiveTask>(m_boss_, m_connection_id_)};
+	case ClientClosed:
+		return {std::make_shared<ConnectionCloseTask>(m_boss_, m_connection_id_)};
+	case NeedReTry:
+		temp_data_buffer.resize(old_size);
+		return {std::make_shared<BrepDataReceiveTask>(m_boss_, m_connection_id_)}; 
+	default:
+		return {std::make_shared<ErrorThrowTask>("Recv")};
+	}
+}
+
+std::vector<std::shared_ptr<Task>> BrepDataSetTask::run()
+{
+	if(m_boss_->m_connection_map_.find(m_connection_id_) == m_boss_->m_connection_map_.end()) {
+		return {};
 	}
 
-    if(received < 0)
-    {
-		if (WSAGetLastError() == WSAEWOULDBLOCK)
-		{
-			temp_data_buffer.resize(old_size);
-			m_task_deque_.emplace_back([this, &connection]
-				{
-					receiveBrepData(connection);
-				});
-		}
-		else
-		{
-			auto ec = std::error_code(WSAGetLastError(), utf8_system_category());
-			throw std::system_error(ec, "recv");
-		}
-        return;
-    }
+	auto& connection = m_boss_->m_connection_map_[m_connection_id_];
+	auto& temp_data_buffer = connection.m_reserve_buffer;
+	const size_t HEADER_SIZE = sizeof(int32_t); 
+	size_t buffer_size = temp_data_buffer.size();
 
-	temp_data_buffer.resize(old_size + received);
-
-	// 处理缓冲区中的数据
-
-		// 检查是否有足够的数据读取消息长度
-	if (temp_data_buffer.size() < HEADER_SIZE){
-		m_task_deque_.emplace_back([this, &connection]
-			{
-				receiveBrepData(connection);
-			});
-        return;
-    }
-
-	// 读取消息长度（前4字节）
-	int32_t data_length_r = 0;
-	memcpy(&data_length_r, temp_data_buffer.data(), HEADER_SIZE);
-	int32_t data_length = ntohl(data_length_r);
-
-	// 检查是否有足够的数据读取完整的消息
-	if (temp_data_buffer.size() < HEADER_SIZE + data_length){
-		m_task_deque_.emplace_back([this, &connection]
-			{
-				receiveBrepData(connection);
-			});
-        return;
-    }
-
-	// 提取完整的消息数据
 	std::string draw_data;
-	draw_data.resize(data_length);
-	memcpy(draw_data.data(), temp_data_buffer.data() + HEADER_SIZE, data_length); //这里可以优化，但目前没太大必要                        
-	temp_data_buffer.erase(0, HEADER_SIZE + data_length);// 从缓冲区中移除已处理的数据
+	RunResult res = LackData;
 
-	// 处理消息数据
-	connection.m_brep_data_list.push_back(draw_data);
-	if (connection.m_id == getCriticalSection().m_current_connetion_id.value()) {
-        if(getCriticalSection().m_mode_draw_new)
-            connection.m_data_index = connection.m_brep_data_list.size() - 1;
-		getCriticalSection().m_brep_data.setValue(connection.m_brep_data_list.at(connection.m_data_index));
-		emit sigDrawDataReady();
-        m_task_deque_.emplace_back([this, &connection]
-        {
-	        sleepUntilDrawn(connection);
-        });
+	if(HEADER_SIZE < buffer_size){
+		int32_t data_length_r = 0;
+		memcpy(&data_length_r, temp_data_buffer.data(), HEADER_SIZE);
+		int32_t data_length = ntohl(data_length_r);
+		if (data_length < buffer_size) {
+			draw_data.resize(data_length);
+			memcpy(draw_data.data(), temp_data_buffer.data() + HEADER_SIZE, data_length); //这里可以优化，但目前没太大必要                        
+			temp_data_buffer.erase(0, HEADER_SIZE + data_length);// 从缓冲区中移除已处理的数据
+			res = EnoughData;
+		}
 	}
-    else
-    {
-		m_task_deque_.emplace_back([this, &connection]
-			{
-				receiveBrepData(connection);
-			});
-    }
-}
 
-void MyServer::sleepUntilDrawn(ConnectionInfo & connection)
-{
-	if (!getCriticalSection().m_has_drawn)
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 暂停执行100毫秒
-		m_task_deque_.emplace_back([this, &connection]
-		{
-			sleepUntilDrawn(connection);
-		});
-	}
-	else
-	{
+	if(res == EnoughData) {
+		getCriticalSection().m_brep_data.setValue(std::move(draw_data));
 		getCriticalSection().m_has_drawn = false;
-		receiveBrepData(connection);
-    }
+		emit m_boss_->sigDrawDataReady();
+		return {std::make_shared<WaitingDrawTask>(m_boss_, m_connection_id_)};
+	}
+	else{
+		return {std::make_shared<BrepDataSetTask>(m_boss_, m_connection_id_)};
+	}
 }
 
-bool MyServer::isConnectionIdValid(SOCKET connetion_id)
+std::vector<std::shared_ptr<Task>> WaitingDrawTask::run()
 {
-    return m_connection_map_.find(connetion_id) != m_connection_map_.end();
+	if(getCriticalSection().m_has_drawn){
+		return {std::make_shared<BrepDataSetTask>(m_boss_, m_connection_id_)};
+	}
+	else{
+		std::this_thread::sleep_for(std::chrono::microseconds(100));
+		return {std::make_shared<WaitingDrawTask>(m_boss_, m_connection_id_)};
+	}
 }
 
+std::vector<std::shared_ptr<Task>> ConnectionCloseTask::run()
+{
+	m_boss_->m_connection_map_.erase(m_connection_id_);
+	closesocket(m_connection_id_);
+	return {};
+}
 
