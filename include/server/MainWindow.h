@@ -12,11 +12,11 @@ class MainWindow : public QMainWindow
 
 public:
     MainWindow(QWidget* parent = nullptr);
-    ~MainWindow();
+    ~MainWindow() override = default;
 
 private:
-    OcctViewer* mOcctViewer;
-    MyServer* m_server;
+    OcctViewer* m_occt_viewer_;
+    MyServer* m_server_;
 };
 
 #endif // MAINWINDOW_H

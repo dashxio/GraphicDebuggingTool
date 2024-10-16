@@ -30,13 +30,36 @@ MyServer::WSAContext::~WSAContext() {
 
 MyServer::~MyServer()
 {
+	getCriticalSection().m_stop_server = true;
+    m_work_thread_.join();
     if (m_id_ != INVALID_SOCKET) {
         closesocket(m_id_);
     }
 
-    m_work_thread_.join();
 }
 
+void MyServer::onMovePreviousBrep()
+{
+	if(!getCriticalSection().m_mode_draw_new){
+		auto& task_deque = getCriticalSection().m_task_deque;
+		task_deque.push(std::make_shared<PreviousBrepTask>(this, getCriticalSection().m_current_connetion_id.value()));
+	}
+}
+
+void MyServer::onMoveNextBrep()
+{
+	if(!getCriticalSection().m_mode_draw_new){
+		auto& task_deque = getCriticalSection().m_task_deque;
+		task_deque.push(std::make_shared<NextBrepTask>(this, getCriticalSection().m_current_connetion_id.value()));
+	}
+}
+
+void MyServer::onUpdateMode(bool selected)
+{
+	getCriticalSection().m_mode_draw_new = selected;
+	auto current_id = getCriticalSection().m_current_connetion_id.value();
+	m_connection_map_[current_id].setCurrentIndexToLatest();
+}
 
 MyServer& MyServer::withListenPort(std::string ip, std::string port)
 {
@@ -64,16 +87,23 @@ MyServer& MyServer::withListenPort(std::string ip, std::string port)
 
 void MyServer::run()
 {
-	m_task_deque_.emplace_back(std::make_shared<ConnectionAcceptTask>(this));
-	
-	std::thread t([this] {
-		while (!m_task_deque_.empty()) {
-			auto t1 = m_task_deque_.front();
-			m_task_deque_.pop_front();
-			for (auto t2 : t1->run()) {
-				m_task_deque_.emplace_back(t2);
+	auto guardFunc = [this]{
+		auto& task_deque = getCriticalSection().m_task_deque;
+		task_deque.push(std::make_shared<ConnectionAcceptTask>(this));
+		while (!task_deque.getAccessor().value().empty()) {
+			if (getCriticalSection().m_stop_server) /*[[unlikely]]*/ {
+				task_deque.getAccessor().value().clear();
+				return;
 			}
+
+			auto t1 = task_deque.pop();
+			task_deque.push_many(t1->run());
 		}
+	};
+	
+	
+	std::thread t([guardFunc] {
+		guardFunc();
 	});
 
     m_work_thread_ = std::move(t);
@@ -102,9 +132,10 @@ std::vector<std::shared_ptr<Task>> ConnectionAcceptTask::run()
 	switch(res)
 	{
 	case AcceptOne:
+		getCriticalSection().m_current_connetion_id.setValue(m_recently_connected);
 		m_boss_->m_connection_map_.emplace(m_recently_connected, MyServer::ConnectionInfo{ m_recently_connected });
 		return { std::make_shared<BrepDataReceiveTask>(m_boss_, m_recently_connected),
-			std::make_shared<BrepDataSetTask>(m_boss_, m_recently_connected) };
+			std::make_shared<BrepDataSetTask>(m_boss_) };
 
 	case NeedReTry:
 		return { std::make_shared<ConnectionAcceptTask>(m_boss_) };
@@ -116,26 +147,61 @@ std::vector<std::shared_ptr<Task>> ConnectionAcceptTask::run()
 
 std::vector<std::shared_ptr<Task>> BrepDataReceiveTask::run()
 {
-	auto& connection = m_boss_->m_connection_map_[m_connection_id_];
-	auto& temp_data_buffer = connection.m_reserve_buffer;
-	size_t old_size = temp_data_buffer.size();
-	size_t new_size = old_size + 4096;
-	temp_data_buffer.resize(new_size);
 
-	auto res = convert_return(recv(m_connection_id_, temp_data_buffer.data()+old_size, 4096,0))
+	auto recvBrepDataFromSocket = [](MyServer::ConnectionInfo& connection){
+		auto& temp_data_buffer = connection.m_reserve_buffer;
+		size_t old_size = temp_data_buffer.size();
+		size_t new_size = old_size + 4096;
+		temp_data_buffer.resize(new_size);
+
+		auto res = convert_return(recv(connection.m_id, temp_data_buffer.data()+old_size, 4096,0))
 		.to(Received).if_meet_condition([](auto received) {return received > 0; })
 		.to(ClientClosed).if_meet_condition([](auto received){return received == 0;})
 		.to(NeedReTry).if_meet_condition([](auto received){return received < 0 && WSAGetLastError() == WSAEWOULDBLOCK;})
 		.to(Error);
 
+		if(res == Received){
+			temp_data_buffer.resize(old_size + res.result());
+		}
+		else if(res == NeedReTry){
+			temp_data_buffer.resize(old_size);
+		}
+
+		return res.value();
+	};
+
+	auto addBrepDataToList = [](MyServer::ConnectionInfo& connection) {
+		auto& temp_data_buffer = connection.m_reserve_buffer;
+		const size_t HEADER_SIZE = sizeof(int32_t);
+		size_t buffer_size = temp_data_buffer.size();
+
+		std::string draw_data;
+		if (HEADER_SIZE < buffer_size) {
+			int32_t data_length_r = 0;
+			memcpy(&data_length_r, temp_data_buffer.data(), HEADER_SIZE);
+			int32_t data_length = ntohl(data_length_r);
+			if (data_length < buffer_size) {
+				draw_data.resize(data_length);
+				memcpy(draw_data.data(), temp_data_buffer.data() + HEADER_SIZE, data_length); //这里可以优化，但目前没太大必要                        
+				temp_data_buffer.erase(0, HEADER_SIZE + data_length);// 从缓冲区中移除已处理的数据
+				connection.m_brep_data_list.push_back(draw_data);
+				if (getCriticalSection().m_mode_draw_new) {
+					connection.setCurrentIndexToLatest();
+				}
+			}
+		}
+	};
+
+	auto& connection = m_boss_->m_connection_map_[m_connection_id_];
+	auto res = recvBrepDataFromSocket(connection);
+	addBrepDataToList(connection);
+
 	switch(res){
 	case Received:
-		temp_data_buffer.resize(old_size+res.result());
 		return { std::make_shared<BrepDataReceiveTask>(m_boss_, m_connection_id_)};
 	case ClientClosed:
 		return {std::make_shared<ConnectionCloseTask>(m_boss_, m_connection_id_)};
 	case NeedReTry:
-		temp_data_buffer.resize(old_size);
 		return {std::make_shared<BrepDataReceiveTask>(m_boss_, m_connection_id_)}; 
 	default:
 		return {std::make_shared<ErrorThrowTask>("Recv")};
@@ -144,49 +210,33 @@ std::vector<std::shared_ptr<Task>> BrepDataReceiveTask::run()
 
 std::vector<std::shared_ptr<Task>> BrepDataSetTask::run()
 {
-	if(m_boss_->m_connection_map_.find(m_connection_id_) == m_boss_->m_connection_map_.end()) {
+	SOCKET current_id = getCriticalSection().m_current_connetion_id.value();
+	if(m_boss_->m_connection_map_.find(current_id) == m_boss_->m_connection_map_.end()) {
 		return {};
 	}
 
-	auto& connection = m_boss_->m_connection_map_[m_connection_id_];
-	auto& temp_data_buffer = connection.m_reserve_buffer;
-	const size_t HEADER_SIZE = sizeof(int32_t); 
-	size_t buffer_size = temp_data_buffer.size();
+	auto& connection = m_boss_->m_connection_map_[current_id];
 
-	std::string draw_data;
-	RunResult res = LackData;
-
-	if(HEADER_SIZE < buffer_size){
-		int32_t data_length_r = 0;
-		memcpy(&data_length_r, temp_data_buffer.data(), HEADER_SIZE);
-		int32_t data_length = ntohl(data_length_r);
-		if (data_length < buffer_size) {
-			draw_data.resize(data_length);
-			memcpy(draw_data.data(), temp_data_buffer.data() + HEADER_SIZE, data_length); //这里可以优化，但目前没太大必要                        
-			temp_data_buffer.erase(0, HEADER_SIZE + data_length);// 从缓冲区中移除已处理的数据
-			res = EnoughData;
-		}
-	}
-
-	if(res == EnoughData) {
-		getCriticalSection().m_brep_data.setValue(std::move(draw_data));
+	auto next_draw_data = connection.getCurrentBrepData();
+	if(getCriticalSection().m_brep_data.value() != next_draw_data) {
+		getCriticalSection().m_brep_data.setValue(next_draw_data);
 		getCriticalSection().m_has_drawn = false;
 		emit m_boss_->sigDrawDataReady();
-		return {std::make_shared<WaitingDrawTask>(m_boss_, m_connection_id_)};
+		return {std::make_shared<WaitingDrawTask>(m_boss_)};
 	}
 	else{
-		return {std::make_shared<BrepDataSetTask>(m_boss_, m_connection_id_)};
+		return {std::make_shared<BrepDataSetTask>(m_boss_)};
 	}
 }
 
 std::vector<std::shared_ptr<Task>> WaitingDrawTask::run()
 {
 	if(getCriticalSection().m_has_drawn){
-		return {std::make_shared<BrepDataSetTask>(m_boss_, m_connection_id_)};
+		return {std::make_shared<BrepDataSetTask>(m_boss_)};
 	}
 	else{
 		std::this_thread::sleep_for(std::chrono::microseconds(100));
-		return {std::make_shared<WaitingDrawTask>(m_boss_, m_connection_id_)};
+		return {std::make_shared<WaitingDrawTask>(m_boss_)};
 	}
 }
 

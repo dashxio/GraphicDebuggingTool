@@ -4,12 +4,13 @@
 #include <mutex>
 #include <condition_variable>
 #include <iterator>
+#include <type_traits>
 
 template <typename T>
 class MTObj {
 private:
-	std::mutex m_mtx;
 	T m_value;
+	std::mutex m_mtx;
 
 public:
 	class Accessor {
@@ -47,6 +48,22 @@ class MTQueue {
 	std::deque<T> m_arr;
 
 public:
+	class Accessor {
+		MTQueue& m_d;
+		std::unique_lock<std::mutex> m_guard;
+
+	public:
+		Accessor(MTQueue& d) : m_d(d), m_guard(d.m_mtx) {}
+
+		std::deque<T>& value(){
+			return m_d.m_arr;
+		}
+	};
+
+	Accessor getAccessor(){
+		return {*this};
+	}
+
 	T pop() {
 		std::unique_lock lck(m_mtx);
 		m_cv.wait(lck, [this] {return !m_arr.empty(); });
@@ -74,5 +91,15 @@ public:
 		std::copy(std::move_iterator(vals.begin()), std::move_iterator(vals.end()), std::back_insert_iterator(m_arr));
 		m_cv.notify_all();
 	}
+
+    template<typename Iterable, 
+		typename = std::enable_if_t<!std::is_same_v<decltype(std::begin(std::declval<Iterable>())), void>>>
+    void push_many(Iterable&& vals) {
+        std::unique_lock lck(m_mtx);
+        std::copy(std::make_move_iterator(std::begin(vals)),
+                  std::make_move_iterator(std::end(vals)),
+                  std::back_inserter(m_arr));
+        m_cv.notify_all();
+    }
 
 };

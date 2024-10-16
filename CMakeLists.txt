@@ -22,12 +22,12 @@ endif()
 add_executable(server 
 "src/server/main.cpp" 
 "src/server/Server.cpp" 
-"src/server/OCCTViewer.cpp" 
+"src/server/OcctViewer.cpp" 
 "src/server/MainWindow.cpp"
 "include/server/Server.h" 
 "include/common/MTQueue.hpp" 
 "include/server/MainWindow.h" 
-"include/server/OCCTViewer.h")
+"include/server/OcctViewer.h")
 target_include_directories(server PRIVATE include ${OPENCASCADE_INCLUDE_DIR})
 target_link_libraries(server PRIVATE ${OpenCASCADE_LIBRARIES} Qt5::Widgets Boost::locale)
 set_target_properties(server PROPERTIES

@@ -12,20 +12,20 @@
 #include <ws2tcpip.h>
 #include <WinSock2.h>
 #include <Windows.h>
+class Task;
 
 inline auto& getCriticalSection() {
 	static struct CriticalSection {
-		std::atomic<bool> m_has_drawn;
-        MTObj<SOCKET> m_current_connetion_id;
+		std::atomic<bool> m_has_drawn = false;
+		std::atomic<bool> m_stop_server = false;
         std::atomic<bool> m_mode_draw_new = true;
+		MTObj<SOCKET> m_current_connetion_id;
 		MTObj<std::string> m_brep_data;
-        std::deque<SOCKET> m_connection_list;
         MTQueue<SOCKET> m_connection_list_to_delete;
+		MTQueue<std::shared_ptr<Task>> m_task_deque;
 	} c;
     return c;
 }
-
-class Task;
 
 class MyServer : public QObject {
     Q_OBJECT
@@ -47,11 +47,26 @@ public:
 
         int m_data_index = 0;
         std::vector<std::string> m_brep_data_list;
+
+		std::string getCurrentBrepData(){
+			if(m_data_index >= 0 && m_data_index < m_brep_data_list.size())
+				return m_brep_data_list.at(m_data_index);
+			else
+				return "";
+		}
+
+		void setCurrentIndexToLatest(){
+			m_data_index = m_brep_data_list.size() - 1;
+		}
     };
 
 signals:
     void sigDrawDataReady();
-    void sigEraseSocket(SOCKET id);
+
+public slots:
+	void onMovePreviousBrep();
+	void onMoveNextBrep();
+	void onUpdateMode(bool selected);
 
 public:
     MyServer& withListenPort(std::string ip, std::string port);
@@ -59,7 +74,6 @@ public:
 
 
     SOCKET m_id_ = INVALID_SOCKET;
-    std::deque<std::shared_ptr<Task>> m_task_deque_;
     std::unordered_map<SOCKET, ConnectionInfo> m_connection_map_;
 
 private:
@@ -119,7 +133,7 @@ public:
 		LackData,
 	};
 
-	BrepDataSetTask(MyServer* boss, SOCKET connection) : m_boss_(boss), m_connection_id_(connection) {}
+	BrepDataSetTask(MyServer* boss) : m_boss_(boss) {}
 	std::vector<std::shared_ptr<Task>> run() override;
 
 private:
@@ -136,12 +150,11 @@ public:
 		LackData,
 	};
 
-	WaitingDrawTask(MyServer* boss, SOCKET connection) : m_boss_(boss), m_connection_id_(connection) {}
+	WaitingDrawTask(MyServer* boss) : m_boss_(boss){}
 	std::vector<std::shared_ptr<Task>> run() override;
 
 private:
 	MyServer* m_boss_ = nullptr;
-	SOCKET m_connection_id_ = INVALID_SOCKET;
 };
 
 
@@ -165,4 +178,42 @@ public:
 private:
 	std::string m_str = "error";
 };
+
+class PreviousBrepTask : public Task
+{
+public:
+	PreviousBrepTask(MyServer* boss, SOCKET connection) : m_boss_(boss), m_connection_id_(connection) {}
+	std::vector<std::shared_ptr<Task>> run() override{
+		auto& connection = m_boss_->m_connection_map_[m_connection_id_];
+		if(connection.m_data_index > 0){
+			m_boss_->m_connection_map_[m_connection_id_].m_data_index--;
+		}
+		return {};
+	}
+
+private:
+	MyServer* m_boss_ = nullptr;
+	SOCKET m_connection_id_ = INVALID_SOCKET;
+
+};
+
+class NextBrepTask : public Task
+{
+public:
+	NextBrepTask(MyServer* boss, SOCKET connection) : m_boss_(boss), m_connection_id_(connection) {}
+	std::vector<std::shared_ptr<Task>> run() override{
+		auto& connection = m_boss_->m_connection_map_[m_connection_id_];
+		if(connection.m_data_index < connection.m_brep_data_list.size()-1){
+			m_boss_->m_connection_map_[m_connection_id_].m_data_index++;
+		}
+		return {};
+	}
+
+private:
+	MyServer* m_boss_ = nullptr;
+	SOCKET m_connection_id_ = INVALID_SOCKET;
+
+};
+
+
 #endif
